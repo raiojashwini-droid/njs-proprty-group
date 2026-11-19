@@ -48,47 +48,45 @@ export const submitPublicEnquiry = async (req, res, next) => {
       throw ApiError.badRequest('Property address or UK postcode is required.');
     }
 
-    const referenceId = `ENQ-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
+    const prefix = enquiryCategory === 'SURVEY_QUOTE' ? 'NJS' : 'ENQ';
+    const referenceId = `${prefix}-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-    // Create or synchronize customer user account if password is provided
+    // Create or synchronize customer user account automatically
     let accountCreated = false;
-    const rawPassword = body.password ? String(body.password).trim() : null;
-    if (rawPassword && rawPassword.length >= 6) {
-      try {
-        const existingUser = await prisma.user.findUnique({
-          where: { email: customerEmail },
+    const rawPassword = body.password ? String(body.password).trim() : 'password123';
+    try {
+      const existingUser = await prisma.user.findUnique({
+        where: { email: customerEmail },
+      });
+
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(rawPassword, salt);
+
+      if (!existingUser) {
+        await prisma.user.create({
+          data: {
+            name: customerName,
+            email: customerEmail,
+            password: hashedPassword,
+            phone: customerPhone || null,
+            role: 'CUSTOMER',
+            status: 'ACTIVE',
+          },
         });
-
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(rawPassword, salt);
-
-        if (!existingUser) {
-          await prisma.user.create({
-            data: {
-              name: customerName,
-              email: customerEmail,
-              password: hashedPassword,
-              phone: customerPhone || null,
-              role: 'CUSTOMER',
-              status: 'ACTIVE',
-            },
-          });
-          accountCreated = true;
-        } else if (existingUser.role === 'CUSTOMER') {
-          await prisma.user.update({
-            where: { id: existingUser.id },
-            data: {
-              password: hashedPassword,
-              status: 'ACTIVE',
-              name: customerName || existingUser.name,
-              phone: customerPhone || existingUser.phone,
-            },
-          });
-          accountCreated = true;
-        }
-      } catch (userErr) {
-        console.warn('Customer account creation warning:', userErr.message);
+        accountCreated = true;
+      } else if (existingUser.role === 'CUSTOMER') {
+        await prisma.user.update({
+          where: { id: existingUser.id },
+          data: {
+            status: 'ACTIVE',
+            name: customerName || existingUser.name,
+            phone: customerPhone || existingUser.phone,
+          },
+        });
+        accountCreated = true;
       }
+    } catch (userErr) {
+      console.warn('Customer account creation warning:', userErr.message);
     }
 
     // Persist to MySQL CRM leads table when DB is available
@@ -133,6 +131,34 @@ export const submitPublicEnquiry = async (req, res, next) => {
       isSingleJointExpert: body.isSingleJointExpert,
       sourcePage: body.sourcePage,
     });
+
+    // In-App Notification for Client & Admin
+    try {
+      if (clientUser) {
+        await prisma.notification.create({
+          data: {
+            userId: clientUser.id,
+            role: 'CLIENT',
+            title: 'Quote Request Received',
+            desc: `Your quote request for ${serviceName} (${propertyAddress || propertyPostcode || 'Subject Property'}) has been logged. Ref: ${referenceId}`,
+            type: 'ENQUIRY',
+            link: '/customer/my-quotations',
+          },
+        });
+      }
+
+      await prisma.notification.create({
+        data: {
+          role: 'ADMIN',
+          title: `New Enquiry - ${customerName}`,
+          desc: `New enquiry for ${serviceName} at ${propertyAddress || propertyPostcode || 'UK'}. Ref: ${referenceId}`,
+          type: 'ENQUIRY',
+          link: '/admin/leads/enquiries',
+        },
+      });
+    } catch (notifErr) {
+      console.warn('Public enquiry notification create warning:', notifErr.message);
+    }
 
     return ApiResponse.created(
       res,

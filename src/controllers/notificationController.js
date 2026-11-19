@@ -54,7 +54,7 @@ async function seedDefaultNotificationsForRole(user) {
       {
         role: 'ADMIN',
         title: 'Survey Report Uploaded',
-        desc: 'Chartered Surveyor David Thorne uploaded preliminary defect schedule',
+        desc: 'Assigned Chartered Surveyor uploaded preliminary defect schedule',
         type: 'report',
         read: true,
       },
@@ -74,7 +74,7 @@ async function seedDefaultNotificationsForRole(user) {
         role: 'SURVEYOR',
         title: 'Keyholder Access Logistics',
         desc: 'Access confirmed: Keys with Foxtons Mayfair Branch (Ref #FX-402). Concierge code available in job file.',
-        type: 'terms',
+        type: 'booking',
         read: false,
       },
       {
@@ -110,7 +110,7 @@ async function seedDefaultNotificationsForRole(user) {
         userId: user.id,
         role: 'CUSTOMER',
         title: 'Chartered Surveyor Allocated',
-        desc: 'David Thorne MRICS has been assigned as your lead independent chartered surveyor.',
+        desc: 'An accredited RICS Chartered Surveyor has been assigned as your lead independent surveyor.',
         type: 'terms',
         read: false,
       },
@@ -157,13 +157,25 @@ export const getNotifications = async (req, res, next) => {
       });
     }
 
-    // Ensure role-based notifications exist
-    await seedDefaultNotificationsForRole(user);
+    // Fetch clean real notifications without injecting artificial demo data
+    // await seedDefaultNotificationsForRole(user);
+
+    const userEmail = (user.email || '').trim().toLowerCase();
+    let userIds = [user.id];
+    if (userEmail) {
+      try {
+        const matchingUsers = await prisma.user.findMany({
+          where: { email: userEmail },
+          select: { id: true },
+        });
+        userIds = Array.from(new Set([user.id, ...matchingUsers.map((u) => u.id)].filter(Boolean)));
+      } catch {}
+    }
 
     const notifications = await prisma.notification.findMany({
       where: {
         OR: [
-          { userId: user.id },
+          { userId: { in: userIds } },
           { role: user.role, userId: null },
         ],
       },
@@ -171,7 +183,9 @@ export const getNotifications = async (req, res, next) => {
       take: 40,
     });
 
-    const formatted = notifications.map((n) => {
+    const isSurveyor = (user.role || '').toLowerCase() === 'surveyor';
+
+    let formatted = notifications.map((n) => {
       const d = new Date(n.createdAt);
       const timeStr = `${d.toLocaleDateString('en-GB')}, ${d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
       return {
@@ -181,10 +195,101 @@ export const getNotifications = async (req, res, next) => {
         time: timeStr,
         read: n.read,
         type: n.type,
-        amount: n.amount,
+        amount: isSurveyor ? null : n.amount,
         link: n.link,
       };
     });
+
+    // Privacy Shield for Surveyors: Block payments and terms signature notices
+    if (isSurveyor) {
+      formatted = formatted.filter((n) => {
+        if (n.type === 'payment') return false;
+        const title = (n.title || '').toLowerCase();
+        const desc = (n.desc || '').toLowerCase();
+        if (
+          title.includes('payment') ||
+          desc.includes('payment') ||
+          title.includes('invoice') ||
+          desc.includes('invoice') ||
+          title.includes('paid') ||
+          title.includes('£') ||
+          desc.includes('£')
+        ) {
+          return false;
+        }
+        if (
+          (title.includes('terms') || title.includes('contract')) &&
+          (title.includes('signed') || desc.includes('signed'))
+        ) {
+          return false;
+        }
+        return true;
+      });
+    }
+
+    // Live Unread Messages from Chat Hub - Ensure incoming messages alert the bell instantly
+    try {
+      const userRole = (user.role || 'CUSTOMER').toUpperCase();
+      let unreadMessages = [];
+
+      if (userRole === 'CUSTOMER' || userRole === 'SURVEYOR') {
+        const convConditions = userIds.map((uid) => ({ conversationId: `conv-user-${uid}` }));
+        convConditions.push({ conversationId: `conv-user-${user.id}` });
+        convConditions.push({ conversationId: `conv-usr_${user.id}` });
+        if (userEmail) {
+          convConditions.push({ conversationId: { contains: userEmail } });
+        }
+        unreadMessages = await prisma.message.findMany({
+          where: {
+            OR: convConditions,
+            readByCustomer: false,
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+        });
+      } else if (userRole === 'ADMIN' || userRole === 'SUPER_ADMIN') {
+        unreadMessages = await prisma.message.findMany({
+          where: {
+            readByAdmin: false,
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+        });
+      }
+
+      const existingNotifDescs = new Set(
+        formatted
+          .filter((n) => n.type === 'message')
+          .map((n) => (n.desc || '').trim())
+      );
+
+      for (const msg of unreadMessages) {
+        const cleanContent = (msg.content || '').trim();
+        const snippet = cleanContent.length > 140 ? `${cleanContent.slice(0, 140)}...` : cleanContent;
+        if (!existingNotifDescs.has(cleanContent) && !existingNotifDescs.has(snippet)) {
+          const d = new Date(msg.createdAt);
+          const timeStr = `${d.toLocaleDateString('en-GB')}, ${d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+          const msgLink =
+            userRole === 'SURVEYOR'
+              ? '/surveyor/messages'
+              : userRole === 'ADMIN'
+              ? `/admin/messages?conversationId=${msg.conversationId}`
+              : '/customer/messages';
+
+          formatted.unshift({
+            id: `msg-${msg.id}`,
+            title: `💬 New Message from ${msg.senderName || 'Operations Desk'}`,
+            desc: snippet || 'You have an unread message.',
+            time: timeStr,
+            read: false,
+            type: 'message',
+            link: msgLink,
+          });
+        }
+      }
+    } catch (msgErr) {
+      console.warn('Unread messages query in notifications notice:', msgErr.message);
+    }
 
     const unreadCount = formatted.filter((n) => !n.read).length;
 
@@ -204,6 +309,22 @@ export const getNotifications = async (req, res, next) => {
  */
 export const markAsRead = async (req, res, next) => {
   try {
+    const rawId = String(req.params.id);
+
+    if (rawId.startsWith('msg-')) {
+      const msgId = parseInt(rawId.replace('msg-', ''), 10);
+      if (!isNaN(msgId)) {
+        await prisma.message.updateMany({
+          where: { id: msgId },
+          data: {
+            readByCustomer: true,
+            readByAdmin: req.user.role === 'ADMIN',
+          },
+        });
+      }
+      return ApiResponse.success(res, null, 'Message notification marked as read');
+    }
+
     const id = parseInt(req.params.id, 10);
     if (!id || isNaN(id)) {
       throw ApiError.badRequest('Invalid notification ID');
@@ -251,6 +372,28 @@ export const markAllAsRead = async (req, res, next) => {
       },
       data: { read: true },
     });
+
+    try {
+      const userRole = (user.role || 'CUSTOMER').toUpperCase();
+      if (userRole === 'CUSTOMER' || userRole === 'SURVEYOR') {
+        const convId = `conv-user-${user.id}`;
+        await prisma.message.updateMany({
+          where: {
+            OR: [
+              { conversationId: convId },
+              { conversationId: `conv-usr_${user.id}` },
+            ],
+            readByCustomer: false,
+          },
+          data: { readByCustomer: true },
+        });
+      } else if (userRole === 'ADMIN' || userRole === 'SUPER_ADMIN') {
+        await prisma.message.updateMany({
+          where: { readByAdmin: false },
+          data: { readByAdmin: true },
+        });
+      }
+    } catch {}
 
     return ApiResponse.success(res, null, 'All notifications marked as read');
   } catch (error) {
