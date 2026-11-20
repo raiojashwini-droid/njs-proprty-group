@@ -147,13 +147,66 @@ export const createUser = async (req, res, next) => {
 export const updateUser = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, phone, role, status, password } = req.body;
-    const userId = parseInt(id);
+    const { name, phone, role, status, password, email } = req.body;
+    
+    let targetUser = null;
+    const parsedId = parseInt(id);
+    const targetEmail = (email || (isNaN(parsedId) ? id : '') || '').trim().toLowerCase();
+
+    // 1. Try finding by numeric id first if valid
+    if (!isNaN(parsedId) && parsedId > 0) {
+      targetUser = await prisma.user.findUnique({ where: { id: parsedId } });
+    }
+
+    // 2. If not found or if targetEmail is specified and doesn't match, find by email
+    if ((!targetUser || (targetEmail && targetUser.email.toLowerCase() !== targetEmail)) && targetEmail) {
+      const userByEmail = await prisma.user.findUnique({ where: { email: targetEmail } });
+      if (userByEmail) {
+        targetUser = userByEmail;
+      }
+    }
+
+    // 3. If user still not found in DB, but email is provided: auto-create user in DB so password & account exist immediately!
+    if (!targetUser && targetEmail) {
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = password ? await bcrypt.hash(String(password).trim(), salt) : await bcrypt.hash('123456', salt);
+      const rawRole = String(role || 'CUSTOMER').toUpperCase();
+      const normalizedRole = ['ADMIN', 'SUPER_ADMIN'].includes(rawRole) ? 'ADMIN' : (rawRole === 'SURVEYOR' ? 'SURVEYOR' : 'CUSTOMER');
+
+      targetUser = await prisma.user.create({
+        data: {
+          name: name || targetEmail.split('@')[0],
+          email: targetEmail,
+          password: hashedPassword,
+          role: normalizedRole,
+          phone: phone || null,
+          status: status ? (status.toUpperCase().includes('BLOCK') ? 'INACTIVE' : 'ACTIVE') : 'ACTIVE',
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          phone: true,
+          status: true,
+          updatedAt: true,
+        },
+      });
+
+      return ApiResponse.success(res, { user: targetUser }, 'User created and credentials saved successfully');
+    }
+
+    if (!targetUser) {
+      throw ApiError.notFound('User not found in system');
+    }
 
     const data = {};
     if (name) data.name = name;
     if (phone !== undefined) data.phone = phone;
-    if (role) data.role = role.toUpperCase();
+    if (role) {
+      const rawRole = String(role).toUpperCase();
+      data.role = ['ADMIN', 'SUPER_ADMIN'].includes(rawRole) ? 'ADMIN' : (rawRole === 'SURVEYOR' ? 'SURVEYOR' : 'CUSTOMER');
+    }
     if (status) {
       const upper = status.toUpperCase();
       if (upper.includes('BLOCK') || upper.includes('INACTIVE') || upper.includes('DEACTIVAT')) {
@@ -169,8 +222,8 @@ export const updateUser = async (req, res, next) => {
       data.password = await bcrypt.hash(String(password).trim(), salt);
     }
 
-    const user = await prisma.user.update({
-      where: { id: userId },
+    const updated = await prisma.user.update({
+      where: { id: targetUser.id },
       data,
       select: {
         id: true,
@@ -183,7 +236,7 @@ export const updateUser = async (req, res, next) => {
       },
     });
 
-    return ApiResponse.success(res, { user }, 'User updated successfully');
+    return ApiResponse.success(res, { user: updated }, 'User updated successfully');
   } catch (error) {
     next(error);
   }
