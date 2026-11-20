@@ -115,44 +115,13 @@ export const login = async (req, res, next) => {
       }
     }
 
-    // 3. Auto-provision Customer account if logging in or previously submitted a quote
-    if (!user && cleanEmail.includes('@')) {
-      const pRole = (portalRole || '').toUpperCase();
-      const isCustomerIntent =
-        pRole === 'CUSTOMER' ||
-        pRole === 'CLIENT' ||
-        (!pRole && !cleanEmail.includes('admin') && !cleanEmail.includes('surveyor'));
-
-      if (isCustomerIntent) {
-        try {
-          const lead = await prisma.lead.findFirst({
-            where: { clientEmail: cleanEmail },
-          });
-          const salt = await bcrypt.genSalt(10);
-          const hashedPassword = await bcrypt.hash(cleanPassword || 'password123', salt);
-          user = await prisma.user.create({
-            data: {
-              name: lead?.clientName || cleanEmail.split('@')[0],
-              email: cleanEmail,
-              password: hashedPassword,
-              role: 'CUSTOMER',
-              phone: lead?.clientPhone || null,
-              status: 'ACTIVE',
-            },
-          });
-        } catch {
-          user = await prisma.user.findUnique({ where: { email: cleanEmail } });
-        }
-      }
-    }
-
     if (!user) {
-      throw ApiError.unauthorized('Invalid email or password');
+      throw ApiError.unauthorized('No registered account found with this email. Please register first.');
     }
 
     let isMatch = await bcrypt.compare(cleanPassword, user.password);
 
-    // Seamlessly support standard prefill passwords ('admin123', 'Password123!', 'password123')
+    // Seamlessly support standard prefill passwords for operational admin/surveyor accounts
     if (!isMatch) {
       if (
         user.role === 'ADMIN' &&
@@ -164,14 +133,11 @@ export const login = async (req, res, next) => {
         (cleanPassword === 'surveyor123' || cleanPassword === 'password123' || cleanPassword === 'Password123!')
       ) {
         isMatch = true;
-      } else if (user.role === 'CUSTOMER') {
-        // Customer who requested quote can sign in smoothly with their chosen password
-        isMatch = true;
       }
     }
 
     if (!isMatch) {
-      throw ApiError.unauthorized('Invalid email or password');
+      throw ApiError.unauthorized('Invalid password. Please enter the password you registered with.');
     }
 
     // ========================================================
