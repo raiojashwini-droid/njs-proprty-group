@@ -23,7 +23,16 @@ const escapeHtml = (value = '') =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 
-export const buildEmailHeader = (title = 'NJS PROPERTY GROUP', subtitle = 'Independent RICS-Regulated Practice') => `
+export const sanitizeSurveyStandard = (text) => {
+  if (!text) return '';
+  return String(text)
+    .replace(/\s*\(\s*Full\s+Structural\s*\)/gi, '')
+    .replace(/\s*Full\s+Structural\s*/gi, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+};
+
+export const buildEmailHeader = (title = 'NJS PROPERTY GROUP', subtitle = 'Independent RICS-Regulated Practice • Firm #084920') => `
   <div style="background: #ffffff; padding: 20px 26px; border-bottom: 1px solid #e2e8f0; text-align: left;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width: 100%; border-collapse: collapse;">
       <tr>
@@ -46,8 +55,8 @@ export const buildEmailHeader = (title = 'NJS PROPERTY GROUP', subtitle = 'Indep
 
 export const buildEmailFooter = () => `
   <div style="background: #f8fafc; padding: 18px 26px; text-align: center; font-size: 11.5px; color: #64748b; border-top: 1px solid #e2e8f0; line-height: 1.6;">
-    <div style="font-weight: 700; color: #0B1F4D; margin-bottom: 4px; font-size: 12px; line-height: 1.4;">NJS Property Group Ltd &bull; Chartered Surveyors</div>
-    <div>Regulated by RICS &bull; Phone: <a href="tel:03333052777" style="color: #0B1F4D; font-weight: 700; text-decoration: none;">0333 305 2777</a> &bull; Email: <a href="mailto:info@njspropertygroup.com" style="color: #2563EB; text-decoration: none;">info@njspropertygroup.com</a></div>
+    <div style="font-weight: 700; color: #0B1F4D; margin-bottom: 4px; font-size: 12px; line-height: 1.4;">NJS Property Group Ltd &bull; Independent Chartered Surveyors</div>
+    <div>Regulated by RICS &bull; Firm #084920 &bull; Phone: <a href="tel:03333052777" style="color: #0B1F4D; font-weight: 700; text-decoration: none;">0333 305 2777</a> &bull; Email: <a href="mailto:info@njspropertygroup.com" style="color: #2563EB; text-decoration: none;">info@njspropertygroup.com</a></div>
     <div style="color: #94a3b8; font-size: 10.5px; margin-top: 6px;">&copy; ${new Date().getFullYear()} NJS Property Group Ltd. All rights reserved under UK Law.</div>
   </div>
 `;
@@ -260,10 +269,11 @@ export const sendQuoteProposalEmail = async ({
   propertyAddress,
   quoteLink,
 }) => {
-  const subject = `Your Formal RICS Survey Proposal: ${surveyType} — NJS Property Group`;
+  const cleanSurveyType = sanitizeSurveyStandard(surveyType) || 'RICS Home Survey';
+  const subject = `Your Formal RICS Survey Proposal: ${cleanSurveyType} — NJS Property Group`;
   const html = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 12px rgba(11, 31, 77, 0.06);">
-      ${buildEmailHeader('NJS PROPERTY GROUP — FORMAL SURVEY PROPOSAL', `RICS Practice Reference • ${escapeHtml(surveyType || 'RICS Home Survey')}`)}
+      ${buildEmailHeader('NJS PROPERTY GROUP — FORMAL SURVEY PROPOSAL', `RICS Practice Reference • ${escapeHtml(cleanSurveyType)}`)}
       
       <div style="padding: 28px; color: #1e293b; font-size: 14px; line-height: 1.6;">
         <h2 style="color: #0B1F4D; font-size: 18px; margin-top: 0;">Dear ${escapeHtml(clientName || 'Valued Client')},</h2>
@@ -277,7 +287,7 @@ export const sendQuoteProposalEmail = async ({
             </tr>
             <tr>
               <td style="padding: 12px 0; color: #64748b; font-weight: 500; vertical-align: top; width: 38%; border-bottom: 1px solid #e2e8f0;">Survey Standard:</td>
-              <td style="padding: 12px 0; font-weight: 700; color: #0B1F4D; text-align: right; vertical-align: top; width: 62%; line-height: 1.45; border-bottom: 1px solid #e2e8f0; word-break: break-word;">${escapeHtml(surveyType || 'RICS Level 2 Home Survey')}</td>
+              <td style="padding: 12px 0; font-weight: 700; color: #0B1F4D; text-align: right; vertical-align: top; width: 62%; line-height: 1.45; border-bottom: 1px solid #e2e8f0; word-break: break-word;">${escapeHtml(cleanSurveyType)}</td>
             </tr>
             <tr>
               <td style="padding: 14px 0 6px 0; color: #475569; font-weight: 600; vertical-align: middle; width: 45%;">
