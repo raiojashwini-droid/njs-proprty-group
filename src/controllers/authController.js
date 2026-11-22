@@ -8,7 +8,7 @@ import { touchUserPresence, clearUserPresence } from '../services/userPresenceSe
 
 export const register = async (req, res, next) => {
   try {
-    const { name, email, password, role = 'CUSTOMER', phone } = req.body;
+    const { name, email, password, role = 'CUSTOMER', phone, address, postcode } = req.body;
 
     if (!env.ENABLE_CLIENT_PORTAL_LOGIN && (!role || String(role).toUpperCase() === 'CUSTOMER')) {
       throw ApiError.forbidden('Client portal registration is currently deactivated.');
@@ -19,24 +19,52 @@ export const register = async (req, res, next) => {
     }
 
     const cleanEmail = email.toLowerCase().trim();
-    const existingUser = await prisma.user.findUnique({
+    let existingUser = await prisma.user.findUnique({
       where: { email: cleanEmail },
     });
-
-    if (existingUser) {
-      throw ApiError.badRequest('An account with this email already exists. Please sign in with your existing password.');
-    }
 
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
+    if (existingUser) {
+      // If user already exists in User table, update their password and ensure status ACTIVE
+      existingUser = await prisma.user.update({
+        where: { id: existingUser.id },
+        data: {
+          name: name ? name.trim() : existingUser.name,
+          password: hashedPassword,
+          phone: phone ? String(phone).trim() : existingUser.phone,
+          status: 'ACTIVE',
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          phone: true,
+          status: true,
+          createdAt: true,
+        },
+      });
+
+      const token = jwt.sign(
+        { id: existingUser.id, email: existingUser.email, role: existingUser.role },
+        env.JWT_SECRET,
+        { expiresIn: env.JWT_EXPIRES_IN }
+      );
+
+      touchUserPresence(existingUser.id, existingUser.email);
+      return ApiResponse.success(res, { user: existingUser, token }, 'Registration completed successfully');
+    }
+
     const user = await prisma.user.create({
       data: {
-        name,
+        name: name.trim(),
         email: cleanEmail,
         password: hashedPassword,
-        role,
-        phone,
+        role: 'CUSTOMER',
+        phone: phone ? String(phone).trim() : null,
+        status: 'ACTIVE',
       },
       select: {
         id: true,
@@ -49,12 +77,34 @@ export const register = async (req, res, next) => {
       },
     });
 
+    // Link and sync lead details if quotation inquiry was made before registration
+    try {
+      await prisma.lead.updateMany({
+        where: { clientEmail: cleanEmail },
+        data: {
+          clientName: user.name,
+          ...(user.phone ? { clientPhone: user.phone } : {}),
+        },
+      });
+      await prisma.job.updateMany({
+        where: { clientEmail: cleanEmail },
+        data: {
+          clientId: user.id,
+          clientName: user.name,
+          ...(user.phone ? { clientPhone: user.phone } : {}),
+        },
+      });
+    } catch {
+      // Non-blocking sync
+    }
+
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
       env.JWT_SECRET,
       { expiresIn: env.JWT_EXPIRES_IN }
     );
 
+    touchUserPresence(user.id, user.email);
     return ApiResponse.created(res, { user, token }, 'Registration successful');
   } catch (error) {
     next(error);
@@ -116,13 +166,66 @@ export const login = async (req, res, next) => {
       }
     }
 
+    // 3. Auto-provision Demo Customer account if not existing
+    if (!user && cleanEmail === 'customer@demo.com') {
+      try {
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash('customer123', salt);
+        user = await prisma.user.create({
+          data: {
+            name: 'Eleanor Vance',
+            email: cleanEmail,
+            password: hashedPassword,
+            role: 'CUSTOMER',
+            phone: '+44 7700 900123',
+            status: 'ACTIVE',
+          },
+        });
+      } catch {
+        user = await prisma.user.findUnique({ where: { email: cleanEmail } });
+      }
+    }
+
+    // 4. Auto-provision Customer account if user submitted a Lead inquiry or quotation
+    if (!user && cleanPassword && cleanPassword.length >= 4) {
+      try {
+        const leadMatch = await prisma.lead.findFirst({
+          where: { clientEmail: cleanEmail },
+          orderBy: { createdAt: 'desc' },
+        });
+
+        if (leadMatch) {
+          const salt = await bcrypt.genSalt(10);
+          const hashedPassword = await bcrypt.hash(cleanPassword, salt);
+          user = await prisma.user.create({
+            data: {
+              name: leadMatch.clientName || cleanEmail.split('@')[0],
+              email: cleanEmail,
+              password: hashedPassword,
+              role: 'CUSTOMER',
+              phone: leadMatch.clientPhone || null,
+              status: 'ACTIVE',
+            },
+          });
+          // Also link existing jobs
+          await prisma.job.updateMany({
+            where: { clientEmail: cleanEmail },
+            data: { clientId: user.id },
+          }).catch(() => {});
+        }
+      } catch (autoErr) {
+        console.warn('Customer lead auto-provision warning:', autoErr.message);
+        user = await prisma.user.findUnique({ where: { email: cleanEmail } }).catch(() => null);
+      }
+    }
+
     if (!user) {
-      throw ApiError.unauthorized('No registered account found with this email. Please register first.');
+      throw ApiError.notFound('No registered account found with this email. Please register your account first.');
     }
 
     let isMatch = await bcrypt.compare(cleanPassword, user.password);
 
-    // Seamlessly support standard prefill passwords for operational admin/surveyor accounts
+    // Seamlessly support standard prefill passwords ('admin123', 'Password123!', 'password123', 'customer123')
     if (!isMatch) {
       if (
         user.role === 'ADMIN' &&
@@ -135,26 +238,16 @@ export const login = async (req, res, next) => {
       ) {
         isMatch = true;
       } else if (
-        cleanEmail === 'astp750@gmail.com' &&
-        cleanPassword === '123456'
+        user.role === 'CUSTOMER' &&
+        user.email === 'customer@demo.com' &&
+        (cleanPassword === 'customer123' || cleanPassword === 'password123')
       ) {
-        // Sync the password to 123456 in DB permanently
-        try {
-          const salt = await bcrypt.genSalt(10);
-          const hashedPassword = await bcrypt.hash('123456', salt);
-          await prisma.user.update({
-            where: { id: user.id },
-            data: { password: hashedPassword },
-          });
-        } catch (dbErr) {
-          console.warn('Auto-sync password error:', dbErr?.message);
-        }
         isMatch = true;
       }
     }
 
     if (!isMatch) {
-      throw ApiError.unauthorized('Invalid password. Please enter the password you registered with.');
+      throw ApiError.unauthorized('Invalid password. Please verify your credentials or reset your password.');
     }
 
     // ========================================================
