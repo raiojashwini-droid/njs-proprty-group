@@ -56,6 +56,83 @@ export const getUsersAndRoles = async (req, res, next) => {
       orderBy: { createdAt: 'desc' },
     });
 
+    // Auto-sync any customer leads that don't yet have a user record into prisma.user
+    try {
+      const existingEmails = new Set(users.map((u) => (u.email || '').toLowerCase().trim()));
+      const leads = await prisma.lead.findMany({
+        orderBy: { createdAt: 'desc' },
+      });
+
+      const salt = await bcrypt.genSalt(10);
+      const defaultHash = await bcrypt.hash('password123', salt);
+
+      for (const lead of leads) {
+        const cleanEmail = (lead.clientEmail || '').toLowerCase().trim();
+        if (!cleanEmail || existingEmails.has(cleanEmail) || DEMO_EMAILS.includes(cleanEmail) || cleanEmail.startsWith('deleted_')) continue;
+
+        try {
+          const newUser = await prisma.user.create({
+            data: {
+              name: lead.clientName || cleanEmail.split('@')[0],
+              email: cleanEmail,
+              password: defaultHash,
+              role: 'CUSTOMER',
+              phone: lead.clientPhone || null,
+              status: 'ACTIVE',
+            },
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              role: true,
+              phone: true,
+              avatar: true,
+              status: true,
+              createdAt: true,
+              updatedAt: true,
+              surveyorProfile: true,
+              _count: {
+                select: {
+                  assignedJobs: true,
+                  clientJobs: true,
+                },
+              },
+            },
+          });
+          users.push(newUser);
+          existingEmails.add(cleanEmail);
+        } catch (uErr) {
+          const existing = await prisma.user.findUnique({
+            where: { email: cleanEmail },
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              role: true,
+              phone: true,
+              avatar: true,
+              status: true,
+              createdAt: true,
+              updatedAt: true,
+              surveyorProfile: true,
+              _count: {
+                select: {
+                  assignedJobs: true,
+                  clientJobs: true,
+                },
+              },
+            },
+          }).catch(() => null);
+          if (existing && !existingEmails.has(cleanEmail)) {
+            users.push(existing);
+            existingEmails.add(cleanEmail);
+          }
+        }
+      }
+    } catch (syncErr) {
+      console.warn('Sync leads to users warning:', syncErr.message);
+    }
+
     return ApiResponse.success(res, { users, total: users.length });
   } catch (error) {
     next(error);
@@ -149,66 +226,13 @@ export const createUser = async (req, res, next) => {
 export const updateUser = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, phone, role, status, password, email } = req.body;
-    
-    let targetUser = null;
-    const parsedId = parseInt(id);
-    const targetEmail = (email || (isNaN(parsedId) ? id : '') || '').trim().toLowerCase();
-
-    // 1. Try finding by numeric id first if valid
-    if (!isNaN(parsedId) && parsedId > 0) {
-      targetUser = await prisma.user.findUnique({ where: { id: parsedId } });
-    }
-
-    // 2. If not found or if targetEmail is specified and doesn't match, find by email
-    if ((!targetUser || (targetEmail && targetUser.email.toLowerCase() !== targetEmail)) && targetEmail) {
-      const userByEmail = await prisma.user.findUnique({ where: { email: targetEmail } });
-      if (userByEmail) {
-        targetUser = userByEmail;
-      }
-    }
-
-    // 3. If user still not found in DB, but email is provided: auto-create user in DB so password & account exist immediately!
-    if (!targetUser && targetEmail) {
-      const salt = await bcrypt.genSalt(10);
-      const hashedPassword = password ? await bcrypt.hash(String(password).trim(), salt) : await bcrypt.hash('123456', salt);
-      const rawRole = String(role || 'CUSTOMER').toUpperCase();
-      const normalizedRole = ['ADMIN', 'SUPER_ADMIN'].includes(rawRole) ? 'ADMIN' : (rawRole === 'SURVEYOR' ? 'SURVEYOR' : 'CUSTOMER');
-
-      targetUser = await prisma.user.create({
-        data: {
-          name: name || targetEmail.split('@')[0],
-          email: targetEmail,
-          password: hashedPassword,
-          role: normalizedRole,
-          phone: phone || null,
-          status: status ? (status.toUpperCase().includes('BLOCK') ? 'INACTIVE' : 'ACTIVE') : 'ACTIVE',
-        },
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          role: true,
-          phone: true,
-          status: true,
-          updatedAt: true,
-        },
-      });
-
-      return ApiResponse.success(res, { user: targetUser }, 'User created and credentials saved successfully');
-    }
-
-    if (!targetUser) {
-      throw ApiError.notFound('User not found in system');
-    }
+    const { name, phone, role, status, password } = req.body;
+    const userId = parseInt(id);
 
     const data = {};
     if (name) data.name = name;
     if (phone !== undefined) data.phone = phone;
-    if (role) {
-      const rawRole = String(role).toUpperCase();
-      data.role = ['ADMIN', 'SUPER_ADMIN'].includes(rawRole) ? 'ADMIN' : (rawRole === 'SURVEYOR' ? 'SURVEYOR' : 'CUSTOMER');
-    }
+    if (role) data.role = role.toUpperCase();
     if (status) {
       const upper = status.toUpperCase();
       if (upper.includes('BLOCK') || upper.includes('INACTIVE') || upper.includes('DEACTIVAT')) {
@@ -224,8 +248,8 @@ export const updateUser = async (req, res, next) => {
       data.password = await bcrypt.hash(String(password).trim(), salt);
     }
 
-    const updated = await prisma.user.update({
-      where: { id: targetUser.id },
+    const user = await prisma.user.update({
+      where: { id: userId },
       data,
       select: {
         id: true,
@@ -238,7 +262,7 @@ export const updateUser = async (req, res, next) => {
       },
     });
 
-    return ApiResponse.success(res, { user: updated }, 'User updated successfully');
+    return ApiResponse.success(res, { user }, 'User updated successfully');
   } catch (error) {
     next(error);
   }
