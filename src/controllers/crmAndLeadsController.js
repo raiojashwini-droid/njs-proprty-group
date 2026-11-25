@@ -39,9 +39,6 @@ export const getCrmAndLeads = async (req, res, next) => {
       if (!fee && lead.quotes?.length > 0 && lead.quotes[0].totalAmount) {
         fee = lead.quotes[0].totalAmount;
       }
-      if (!fee && (lead.status === 'QUOTED' || lead.status === 'CONVERTED' || lead.status === 'QUOTE_SENT')) {
-        fee = 660.0;
-      }
       return {
         ...lead,
         estimatedValue: fee ? parseFloat(fee) : null,
@@ -137,7 +134,7 @@ export const updateLeadStatus = async (req, res, next) => {
     } else if (status && (status.toUpperCase() === 'CONVERTED' || status.toUpperCase() === 'QUOTED' || status.toUpperCase() === 'QUOTE_SENT')) {
       const existingLead = await prisma.lead.findUnique({ where, include: { quotes: true } });
       if (!existingLead?.estimatedValue) {
-        updateData.estimatedValue = existingLead?.quotes?.[0]?.totalAmount || 660.0;
+        updateData.estimatedValue = existingLead?.quotes?.[0]?.totalAmount || null;
       }
     }
 
@@ -151,13 +148,14 @@ export const updateLeadStatus = async (req, res, next) => {
     // 1. If status is QUOTE_SENT or QUOTED, sync/create prisma.quote, dispatch proposal email & in-app notification
     if (upperStatus === 'QUOTE_SENT' || upperStatus === 'QUOTED') {
       try {
-        const total = lead.estimatedValue || (estimatedValue ? parseFloat(estimatedValue) : 660.0);
-        const baseFee = Math.round((total / 1.2) * 100) / 100;
-        const vatAmount = Math.round((total - baseFee) * 100) / 100;
+        const total = lead.estimatedValue || (estimatedValue ? parseFloat(estimatedValue) : null);
+        if (total && total > 0) {
+          const baseFee = Math.round((total / 1.2) * 100) / 100;
+          const vatAmount = Math.round((total - baseFee) * 100) / 100;
 
-        const existingQuote = await prisma.quote.findFirst({
-          where: { leadId: lead.id },
-        });
+          const existingQuote = await prisma.quote.findFirst({
+            where: { leadId: lead.id },
+          });
 
         let quoteRef = `QTE-2026-${lead.id}`;
         if (existingQuote) {
@@ -229,6 +227,7 @@ export const updateLeadStatus = async (req, res, next) => {
             link: '/admin/finance/quotations',
           },
         }).catch(() => {});
+        }
       } catch (qErr) {
         console.warn('[updateLeadStatus] quote sync warning:', qErr.message);
       }
@@ -287,8 +286,8 @@ export const updateLeadStatus = async (req, res, next) => {
 
           // Ensure invoice record exists
           const existingInvoice = await prisma.invoice.findFirst({ where: { jobId } });
-          if (!existingInvoice) {
-            const total = lead.estimatedValue || 660.0;
+          const total = lead.estimatedValue ? Number(lead.estimatedValue) : null;
+          if (!existingInvoice && total && total > 0) {
             const subtotal = Math.round((total / 1.2) * 100) / 100;
             const vat = Math.round((total - subtotal) * 100) / 100;
             await prisma.invoice.create({
@@ -522,6 +521,19 @@ export const ingestLsdLead = async (req, res, next) => {
 export const deleteLead = async (req, res, next) => {
   try {
     const { id } = req.params;
+    if (typeof id === 'string' && id.includes('@')) {
+      const cleanEmail = id.toLowerCase().trim();
+      const emailLeads = await prisma.lead.findMany({ where: { clientEmail: cleanEmail }, select: { id: true } });
+      for (const el of emailLeads) {
+        await prisma.callLog.deleteMany({ where: { leadId: el.id } }).catch(() => {});
+        await prisma.complaintLog.deleteMany({ where: { leadId: el.id } }).catch(() => {});
+        await prisma.quote.deleteMany({ where: { leadId: el.id } }).catch(() => {});
+        await prisma.job.updateMany({ where: { leadId: el.id }, data: { leadId: null } }).catch(() => {});
+        await prisma.lead.delete({ where: { id: el.id } }).catch(() => {});
+      }
+      return ApiResponse.success(res, null, 'Leads removed successfully');
+    }
+
     const numId = parseInt(id, 10);
     const where = !isNaN(numId) && String(numId) === String(id)
       ? { OR: [{ id: numId }, { reference: String(id) }] }

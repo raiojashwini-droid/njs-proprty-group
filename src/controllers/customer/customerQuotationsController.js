@@ -14,15 +14,14 @@ export const getCustomerQuotations = async (req, res, next) => {
     const headerName = (req.headers['x-user-name'] || '').toLowerCase().trim();
     const userName = (headerName || req.user?.name || '').toLowerCase().trim();
 
-    // 1. Fetch live quotes from prisma.quote
+    // 1. Fetch live quotes from prisma.quote (strictly scoped by clientId or exact clientEmail)
     const quotes = await prisma.quote.findMany({
       where: {
         OR: [
           ...(userId ? [{ job: { clientId: userId } }] : []),
-          ...(userEmail ? [{ job: { clientEmail: userEmail } }, { job: { clientEmail: { contains: userEmail } } }] : []),
-          ...(userEmail ? [{ lead: { clientEmail: userEmail } }, { lead: { clientEmail: { contains: userEmail } } }] : []),
-          ...(userEmail ? [{ inclusions: { contains: userEmail } }] : []),
-          ...(userName && userName.length > 2 ? [{ inclusions: { contains: userName } }] : []),
+          ...(userEmail ? [{ job: { clientEmail: userEmail } }] : []),
+          ...(userEmail ? [{ lead: { clientEmail: userEmail } }] : []),
+          ...(userEmail ? [{ inclusions: { contains: `"clientEmail":"${userEmail}"` } }] : []),
         ],
       },
       include: {
@@ -98,17 +97,10 @@ export const getCustomerQuotations = async (req, res, next) => {
 
     // 2. Fetch any quoted/pending leads from prisma.lead belonging to this customer
     try {
-      if (userEmail || userId || (userName && userName.length > 2)) {
-        const leadConditions = [];
-        if (userEmail) {
-          leadConditions.push({ clientEmail: userEmail });
-          leadConditions.push({ clientEmail: { contains: userEmail } });
-        }
-        if (userName && userName.length > 2) leadConditions.push({ clientName: { contains: userName } });
-
+      if (userEmail) {
         const leads = await prisma.lead.findMany({
           where: {
-            OR: leadConditions,
+            clientEmail: userEmail,
           },
           include: {
             quotes: true,
@@ -281,9 +273,9 @@ export const acceptCustomerQuotation = async (req, res, next) => {
     const propertyAddress = quote?.job?.propertyAddress || quote?.lead?.propertyAddress || lead?.propertyAddress || 'Subject Property';
     const postcode = quote?.job?.postcode || quote?.lead?.postcode || lead?.postcode || 'GU12AA';
     const serviceType = quote?.job?.serviceType || quote?.lead?.serviceType || lead?.serviceType || 'RICS Level 2 Home Survey (Homebuyer)';
-    const totalFee = Number(quote?.totalAmount || lead?.estimatedValue || 660.0);
-    const baseFee = Number(quote?.baseFee || Math.round((totalFee / 1.2) * 100) / 100);
-    const vatFee = Number(quote?.vatAmount || Math.round((totalFee - baseFee) * 100) / 100);
+    const totalFee = Number(quote?.totalAmount || lead?.estimatedValue || 0);
+    const baseFee = totalFee > 0 ? Number(quote?.baseFee || Math.round((totalFee / 1.2) * 100) / 100) : 0;
+    const vatFee = totalFee > 0 ? Number(quote?.vatAmount || Math.round((totalFee - baseFee) * 100) / 100) : 0;
 
     if (!jobId) {
       try {
@@ -371,7 +363,7 @@ export const acceptCustomerQuotation = async (req, res, next) => {
 
     // Dispatch Quotation Acceptance Email to Customer & CC Admin
     const quoteRef = quote?.reference || (String(id).startsWith('QUO') ? String(id) : `QUO-${id}`);
-    const totalAmount = totalFee ? totalFee.toString() : '660.00';
+    const totalAmount = totalFee > 0 ? totalFee.toString() : 'Pending Estimation';
 
     if (recipientEmail && recipientEmail.includes('@')) {
       sendQuoteAcceptedEmail({

@@ -37,10 +37,11 @@ export const getTermsToSign = async (req, res, next) => {
 
     let resultTerm = term;
     if (term) {
-      const isJobSigned = ['ACCEPTED', 'BOOKED', 'PREPARING_REPORT', 'COMPLETE'].includes(term.job?.stage);
+      // Only advance to signed if term itself is signed or job has already passed booking into inspection/report
+      const isJobAdvanced = ['BOOKED', 'PREPARING_REPORT', 'COMPLETE'].includes(term.job?.stage);
       resultTerm = {
         ...term,
-        signed: term.signed || isJobSigned,
+        signed: Boolean(term.signed || isJobAdvanced),
       };
     }
 
@@ -109,7 +110,7 @@ export const executeDigitalSignature = async (req, res, next) => {
         },
       });
 
-      if (term.jobId) {
+      if (term.jobId && (!term.job?.stage || term.job.stage === 'QUOTE')) {
         await prisma.job.update({
           where: { id: term.jobId },
           data: { stage: 'ACCEPTED' },
